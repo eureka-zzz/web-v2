@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth" >
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Local LAN Messaging</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-300">
+  <div id="app" class="flex flex-col h-screen">
+    <!-- Header -->
+    <header class="flex items-center justify-between p-4 border-b border-gray-300 dark:border-gray-700">
+      <h1 class="text-xl font-semibold">Local LAN Messaging</h1>
+      <button id="toggleTheme" aria-label="Toggle Dark Mode" class="focus:outline-none">
+        <svg id="iconLight" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m8.485-8.485l-.707.707M4.222 4.222l-.707.707m16.97 11.314l-.707.707M4.222 19.778l-.707.707M21 12h-1M4 12H3" />
+        </svg>
+        <svg id="iconDark" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z" />
+        </svg>
+      </button>
+    </header>
+
+    <!-- Main content -->
+    <main class="flex flex-1 overflow-hidden">
+      <!-- Sidebar -->
+      <aside class="w-64 bg-gray-100 dark:bg-gray-800 border-r border-gray-300 dark:border-gray-700 flex flex-col">
+        <div class="p-4 border-b border-gray-300 dark:border-gray-700">
+          <button id="btnCreateGroup" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded">Create Group</button>
+        </div>
+        <div id="groupList" class="flex-1 overflow-y-auto p-2 space-y-2">
+          <!-- Groups will be listed here -->
+        </div>
+      </aside>
+
+      <!-- Chat area -->
+      <section class="flex flex-col flex-1">
+        <div id="chatHeader" class="p-4 border-b border-gray-300 dark:border-gray-700 flex items-center justify-between">
+          <h2 id="chatTitle" class="text-lg font-semibold">Select a chat</h2>
+          <div>
+            <button id="btnBackup" class="mr-2 px-3 py-1 bg-gray-300 dark:bg-gray-700 rounded hover:bg-gray-400 dark:hover:bg-gray-600">Backup Chat</button>
+            <button id="btnSearchToggle" class="px-3 py-1 bg-gray-300 dark:bg-gray-700 rounded hover:bg-gray-400 dark:hover:bg-gray-600">Search</button>
+          </div>
+        </div>
+
+        <div id="searchBar" class="hidden p-2 border-b border-gray-300 dark:border-gray-700">
+          <input type="text" id="searchInput" placeholder="Search messages..." class="w-full p-2 rounded border border-gray-400 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100" />
+        </div>
+
+        <div id="messages" class="flex-1 overflow-y-auto p-4 space-y-4 bg-white dark:bg-gray-900"></div>
+
+        <form id="messageForm" class="p-4 border-t border-gray-300 dark:border-gray-700 flex items-center space-x-2">
+          <textarea id="messageInput" rows="1" placeholder="Type a message..." class="flex-1 resize-none p-2 rounded border border-gray-400 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+          <button type="button" id="btnAttach" aria-label="Attach file" class="text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white focus:outline-none">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.586-6.586a4 4 0 00-5.656-5.656l-6.586 6.586a6 6 0 108.486 8.486L21 12" />
+            </svg>
+          </button>
+          <input type="file" id="fileInput" class="hidden" />
+          <button type="button" id="btnRecord" aria-label="Record voice note" class="text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white focus:outline-none">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 1v11m0 0a3 3 0 01-3 3H7a5 5 0 005 5v-2a3 3 0 003-3v-4a3 3 0 00-3-3z" />
+            </svg>
+          </button>
+          <button type="submit" id="btnSend" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded">Send</button>
+        </form>
+      </section>
+    </main>
+
+    <!-- Modals -->
+    <div id="modalOverlay" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+      <div id="modalContent" class="bg-white dark:bg-gray-800 rounded p-6 w-96 max-w-full">
+        <!-- Modal content will be injected here -->
+      </div>
+    </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+  <script>
+    // Dark mode toggle script
+    const toggleThemeBtn = document.getElementById('toggleTheme');
+    const iconLight = document.getElementById('iconLight');
+    const iconDark = document.getElementById('iconDark');
+
+    function setTheme(dark) {
+      if (dark) {
+        document.documentElement.classList.add('dark');
+        iconDark.classList.remove('hidden');
+        iconLight.classList.add('hidden');
+        localStorage.setItem('theme', 'dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+        iconDark.classList.add('hidden');
+        iconLight.classList.remove('hidden');
+        localStorage.setItem('theme', 'light');
+      }
+    }
+
+    toggleThemeBtn.addEventListener('click', () => {
+      const isDark = document.documentElement.classList.contains('dark');
+      setTheme(!isDark);
+    });
+
+    // Initialize theme on page load
+    const savedTheme = localStorage.getItem('theme');
+    if (savedTheme === 'dark') {
+      setTheme(true);
+    } else {
+      setTheme(false);
+    }
+  </script>
+  </div>
+</body>
+</html>
