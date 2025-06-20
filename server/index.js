@@ -1,19 +1,18 @@
 const express = require('express');
 const path = require('path');
-const low = require('lowdb');
-const FileSync = require('lowdb/adapters/FileSync');
 const session = require('express-session');
 const multer = require('multer');
 const http = require('http');
 const { Server } = require('socket.io');
 const fs = require('fs');
+const low = require('lowdb');
+const FileSync = require('lowdb/adapters/FileSync');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
 const PORT = 3000;
-const DB_PATH = path.join(__dirname, '..', 'db.sqlite');
 const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
 
 // Ensure uploads directory exists
@@ -27,18 +26,22 @@ const storage = multer.diskStorage({
     cb(null, UPLOADS_DIR);
   },
   filename: function (req, file, cb) {
-    // Use timestamp + original name to avoid collisions
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
     cb(null, uniqueSuffix + '-' + file.originalname);
   }
 });
 const upload = multer({ storage: storage, limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB limit
 
-// Initialize better-sqlite3 database
+// Initialize lowdb
 const adapter = new FileSync('db.json');
 const db = low(adapter);
 
-db.defaults({ users: [], pesan: [], grup: [] }).write();
+// Set defaults if JSON file is empty
+db.defaults({
+  users: [],
+  pesan: [],
+  grup: []
+}).write();
 
 // Middleware
 app.use(express.json());
@@ -52,48 +55,71 @@ app.use(session({
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
+// Helper function to get user by IP
 function getUserByIP(ip) {
   return db.get('users').find({ ip_address: ip }).value();
 }
 
+// Authentication middleware
+function authRequired(req, res, next) {
+  if (req.session && req.session.user) {
+    next();
+  } else {
+    res.status(401).json({ error: 'Authentication required' });
+  }
+}
+
 // Middleware to check authentication and redirect accordingly
 app.use((req, res, next) => {
+  // Skip auth check for static files and auth-related routes
+  if (req.path.startsWith('/uploads/') || 
+      req.path === '/register' || 
+      req.path === '/login' ||
+      req.path === '/register.html' ||
+      req.path === '/login.html' ||
+      req.path.endsWith('.js') ||
+      req.path.endsWith('.css')) {
+    return next();
+  }
+
   const ip = req.ip || req.connection.remoteAddress;
   if (req.session && req.session.user) {
-    // User session exists
+    // Update last seen
+    db.get('users')
+      .find({ id: req.session.user.id })
+      .assign({ last_seen: new Date().toISOString() })
+      .write();
     next();
   } else {
     const user = getUserByIP(ip);
     if (!user) {
-      // IP not registered, redirect to register page
-      if (req.path === '/register' || req.path === '/register.html' || req.path.startsWith('/register')) {
-        next();
-      } else {
-        res.redirect('/register.html');
-      }
+      res.redirect('/register.html');
     } else {
-      // IP registered, redirect to login page
-      if (req.path === '/login' || req.path === '/login.html' || req.path.startsWith('/login')) {
-        next();
-      } else {
-        res.redirect('/login.html');
-      }
+      res.redirect('/login.html');
     }
   }
 });
 
+// Registration route
 app.post('/register', (req, res) => {
   const ip = req.ip || req.connection.remoteAddress;
   const { username, password } = req.body;
+  
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password required' });
   }
-  const existingUser = db.get('users').find(user => user.ip_address === ip || user.username === username).value();
+
+  const existingUser = db.get('users')
+    .find(user => user.ip_address === ip || user.username === username)
+    .value();
+
   if (existingUser) {
     return res.status(400).json({ error: 'IP or username already registered' });
   }
+
   const newId = db.get('users').size().value() + 1;
   const role = (username === 'zete' && password === 'zetedec') ? 'admin' : 'user';
+  
   const newUser = {
     id: newId,
     username,
@@ -101,27 +127,43 @@ app.post('/register', (req, res) => {
     ip_address: ip,
     role,
     created_at: new Date().toISOString(),
-    last_seen: null
+    last_seen: new Date().toISOString()
   };
+
   db.get('users').push(newUser).write();
   req.session.user = { id: newUser.id, username, role };
   res.json({ success: true, message: 'Registration successful' });
 });
 
+// Login route
 app.post('/login', (req, res) => {
   const ip = req.ip || req.connection.remoteAddress;
   const { username, password } = req.body;
+
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password required' });
   }
-  const user = db.get('users').find({ username, password }).value();
+
+  const user = db.get('users')
+    .find({ username, password })
+    .value();
+
   if (!user) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
+
   if (user.ip_address !== ip) {
     return res.status(403).json({ error: 'IP address mismatch' });
   }
+
   req.session.user = { id: user.id, username: user.username, role: user.role };
+  
+  // Update last seen
+  db.get('users')
+    .find({ id: user.id })
+    .assign({ last_seen: new Date().toISOString() })
+    .write();
+
   res.json({ success: true, message: 'Login successful' });
 });
 
@@ -131,74 +173,173 @@ app.post('/logout', (req, res) => {
   res.json({ success: true, message: 'Logged out' });
 });
 
-// Middleware to protect routes after login
-function authRequired(req, res, next) {
-  if (req.session && req.session.user) {
-    next();
-  } else {
-    res.status(401).json({ error: 'Authentication required' });
-  }
-}
-
 // Get current user info
 app.get('/me', authRequired, (req, res) => {
   res.json({ user: req.session.user });
 });
 
+// Get all groups
+app.get('/groups', authRequired, (req, res) => {
+  const groups = db.get('grup').value();
+  res.json(groups);
+});
+
+// Create new group
+app.post('/group', authRequired, (req, res) => {
+  const { name, description } = req.body;
+  if (!name) {
+    return res.status(400).json({ error: 'Group name required' });
+  }
+
+  const newId = db.get('grup').size().value() + 1;
+  const newGroup = {
+    id: newId,
+    name,
+    description,
+    admin_id: req.session.user.id,
+    created_at: new Date().toISOString()
+  };
+
+  db.get('grup').push(newGroup).write();
+  res.json({ success: true, group: newGroup });
+});
+
+// Get messages (with optional group filter)
+app.get('/messages/:groupId?', authRequired, (req, res) => {
+  let messages = db.get('pesan');
+  
+  if (req.params.groupId) {
+    messages = messages.filter({ group_id: parseInt(req.params.groupId) });
+  } else {
+    messages = messages.filter({ group_id: null });
+  }
+
+  messages = messages.value().map(msg => {
+    const user = db.get('users').find({ id: msg.user_id }).value();
+    return {
+      ...msg,
+      username: user ? user.username : 'Unknown User'
+    };
+  });
+
+  res.json(messages);
+});
+
+// Search messages
+app.get('/messages/search', authRequired, (req, res) => {
+  const { q, group } = req.query;
+  let messages = db.get('pesan');
+
+  if (group) {
+    messages = messages.filter({ group_id: parseInt(group) });
+  }
+
+  messages = messages
+    .filter(msg => msg.content.toLowerCase().includes(q.toLowerCase()))
+    .value()
+    .map(msg => {
+      const user = db.get('users').find({ id: msg.user_id }).value();
+      return {
+        ...msg,
+        username: user ? user.username : 'Unknown User'
+      };
+    });
+
+  res.json(messages);
+});
+
+// Send message
 app.post('/message', authRequired, (req, res) => {
   const userId = req.session.user.id;
   const { content, group_id, reply_to, mentions } = req.body;
+
   if (!content || content.trim() === '') {
     return res.status(400).json({ error: 'Message content required' });
   }
-  const createdAt = new Date().toISOString();
-  const newMessageId = db.get('pesan').size().value() + 1;
+
+  const newId = db.get('pesan').size().value() + 1;
   const newMessage = {
-    id: newMessageId,
+    id: newId,
     user_id: userId,
     group_id: group_id || null,
     content,
-    created_at: createdAt,
+    created_at: new Date().toISOString(),
     updated_at: null,
     edited: 0,
     pinned: 0,
     reply_to: reply_to || null,
     mentions: mentions || null
   };
+
   db.get('pesan').push(newMessage).write();
-  io.emit('new_message', newMessage);
-  res.json({ success: true, messageId: newMessageId });
+
+  // Add username to the message for socket emission
+  const messageWithUser = {
+    ...newMessage,
+    username: req.session.user.username
+  };
+
+  io.emit('new_message', messageWithUser);
+  res.json({ success: true, messageId: newId });
 });
 
+// Edit message
 app.put('/message/:id', authRequired, (req, res) => {
   const userId = req.session.user.id;
-  const messageId = Number(req.params.id);
+  const messageId = parseInt(req.params.id);
   const { content } = req.body;
+
   if (!content || content.trim() === '') {
     return res.status(400).json({ error: 'Message content required' });
   }
-  let message = db.get('pesan').find({ id: messageId }).value();
-  if (!message) return res.status(404).json({ error: 'Message not found' });
+
+  const message = db.get('pesan').find({ id: messageId }).value();
+  
+  if (!message) {
+    return res.status(404).json({ error: 'Message not found' });
+  }
+
   if (message.user_id !== userId && req.session.user.role !== 'admin') {
     return res.status(403).json({ error: 'Not authorized to edit this message' });
   }
-  const updatedAt = new Date().toISOString();
-  message.content = content;
-  message.updated_at = updatedAt;
-  message.edited = 1;
-  db.get('pesan').find({ id: messageId }).assign(message).write();
-  io.emit('edit_message', { id: messageId, content, updated_at: updatedAt, edited: 1 });
+
+  const updatedMessage = {
+    ...message,
+    content,
+    updated_at: new Date().toISOString(),
+    edited: 1
+  };
+
+  db.get('pesan')
+    .find({ id: messageId })
+    .assign(updatedMessage)
+    .write();
+
+  // Add username for socket emission
+  const messageWithUser = {
+    ...updatedMessage,
+    username: req.session.user.username
+  };
+
+  io.emit('edit_message', messageWithUser);
   res.json({ success: true });
 });
 
+// Delete message
 app.delete('/message/:id', authRequired, (req, res) => {
   const userId = req.session.user.id;
-  const messageId = Number(req.params.id);
-  let message = db.get('pesan').find({ id: messageId }).value();
-  if (!message) return res.status(404).json({ error: 'Message not found' });
+  const messageId = parseInt(req.params.id);
+
+  const message = db.get('pesan').find({ id: messageId }).value();
+  
+  if (!message) {
+    return res.status(404).json({ error: 'Message not found' });
+  }
+
   if (message.user_id !== userId && req.session.user.role !== 'admin') {
     return res.status(403).json({ error: 'Not authorized to delete this message' });
   }
+
   db.get('pesan').remove({ id: messageId }).write();
   io.emit('delete_message', { id: messageId });
   res.json({ success: true });
@@ -213,21 +354,37 @@ app.post('/upload', authRequired, upload.single('file'), (req, res) => {
   res.json({ success: true, fileUrl });
 });
 
-// Serve frontend files
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+// Backup chat
+app.get('/backup', authRequired, (req, res) => {
+  const userId = req.session.user.id;
+  const user = db.get('users').find({ id: userId }).value();
+
+  if (user.role !== 'admin') {
+    return res.status(403).json({ error: 'Only admins can backup chat' });
+  }
+
+  const data = {
+    messages: db.get('pesan').value(),
+    groups: db.get('grup').value(),
+    users: db.get('users').value().map(u => ({
+      ...u,
+      password: undefined // Remove passwords from backup
+    }))
+  };
+
+  res.json(data);
 });
 
-// Start server
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
-
-// Socket.IO connection
+// Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('A user connected');
 
   socket.on('disconnect', () => {
     console.log('User disconnected');
   });
+});
+
+// Start server
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
