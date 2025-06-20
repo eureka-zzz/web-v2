@@ -22,6 +22,18 @@ A fullstack local messaging platform designed to run on Termux (Android) over a 
 
 ---
 
+## Important Update: Database Change
+
+This project now uses **better-sqlite3** instead of **sqlite3** for the database layer.
+
+### Why the change?
+
+- `sqlite3` failed to build on Termux due to native build issues (`node-gyp` and `android_ndk_path` errors).
+- `better-sqlite3` is a synchronous, native SQLite3 binding that does **not** require a build process on Termux.
+- This change improves compatibility and stability on Android Termux environments.
+
+---
+
 ## Installation on Termux (Android)
 
 ### 1. Install Termux
@@ -54,6 +66,8 @@ cd web-v2
 ```bash
 npm install
 ```
+
+This will install all dependencies including `better-sqlite3`.
 
 ### 6. Set permissions (if needed)
 

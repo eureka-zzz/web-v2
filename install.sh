@@ -13,7 +13,7 @@ fi
 
 cd web-v2
 
-echo "Installing Node.js dependencies..."
+echo "Installing Node.js dependencies (including better-sqlite3)..."
 npm install
 
 echo "Setting execute permissions..."
