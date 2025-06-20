@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
-const Database = require('better-sqlite3');
+const low = require('lowdb');
+const FileSync = require('lowdb/adapters/FileSync');
 const session = require('express-session');
 const multer = require('multer');
 const http = require('http');
@@ -34,43 +35,10 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage, limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB limit
 
 // Initialize better-sqlite3 database
-const db = new Database(DB_PATH);
+const adapter = new FileSync('db.json');
+const db = low(adapter);
 
-// Create tables if not exist
-db.prepare(`CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT UNIQUE,
-  password TEXT,
-  ip_address TEXT UNIQUE,
-  role TEXT DEFAULT 'user',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  last_seen DATETIME
-)`).run();
-
-db.prepare(`CREATE TABLE IF NOT EXISTS grup (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT,
-  admin_id INTEGER,
-  description TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY(admin_id) REFERENCES users(id)
-)`).run();
-
-db.prepare(`CREATE TABLE IF NOT EXISTS pesan (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER,
-  group_id INTEGER,
-  content TEXT,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME,
-  edited INTEGER DEFAULT 0,
-  pinned INTEGER DEFAULT 0,
-  reply_to INTEGER,
-  mentions TEXT,
-  FOREIGN KEY(user_id) REFERENCES users(id),
-  FOREIGN KEY(group_id) REFERENCES grup(id),
-  FOREIGN KEY(reply_to) REFERENCES pesan(id)
-)`).run();
+db.defaults({ users: [], pesan: [], grup: [] }).write();
 
 // Middleware
 app.use(express.json());
@@ -84,14 +52,8 @@ app.use(session({
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
-// Helper function to get user by IP
 function getUserByIP(ip) {
-  try {
-    return db.prepare('SELECT * FROM users WHERE ip_address = ?').get(ip);
-  } catch (err) {
-    console.error('DB error in getUserByIP:', err);
-    return null;
-  }
+  return db.get('users').find({ ip_address: ip }).value();
 }
 
 // Middleware to check authentication and redirect accordingly
@@ -120,49 +82,47 @@ app.use((req, res, next) => {
   }
 });
 
-// Registration route
 app.post('/register', (req, res) => {
   const ip = req.ip || req.connection.remoteAddress;
   const { username, password } = req.body;
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password required' });
   }
-  try {
-    const existingUser = db.prepare('SELECT * FROM users WHERE ip_address = ? OR username = ?').get(ip, username);
-    if (existingUser) {
-      return res.status(400).json({ error: 'IP or username already registered' });
-    }
-    const role = (username === 'zete' && password === 'zetedec') ? 'admin' : 'user';
-    const result = db.prepare('INSERT INTO users (username, password, ip_address, role) VALUES (?, ?, ?, ?)').run(username, password, ip, role);
-    req.session.user = { id: result.lastInsertRowid, username, role };
-    res.json({ success: true, message: 'Registration successful' });
-  } catch (err) {
-    console.error('Registration error:', err);
-    res.status(500).json({ error: 'Failed to register user' });
+  const existingUser = db.get('users').find(user => user.ip_address === ip || user.username === username).value();
+  if (existingUser) {
+    return res.status(400).json({ error: 'IP or username already registered' });
   }
+  const newId = db.get('users').size().value() + 1;
+  const role = (username === 'zete' && password === 'zetedec') ? 'admin' : 'user';
+  const newUser = {
+    id: newId,
+    username,
+    password,
+    ip_address: ip,
+    role,
+    created_at: new Date().toISOString(),
+    last_seen: null
+  };
+  db.get('users').push(newUser).write();
+  req.session.user = { id: newUser.id, username, role };
+  res.json({ success: true, message: 'Registration successful' });
 });
 
-// Login route
 app.post('/login', (req, res) => {
   const ip = req.ip || req.connection.remoteAddress;
   const { username, password } = req.body;
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password required' });
   }
-  try {
-    const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?').get(username, password);
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-    if (user.ip_address !== ip) {
-      return res.status(403).json({ error: 'IP address mismatch' });
-    }
-    req.session.user = { id: user.id, username: user.username, role: user.role };
-    res.json({ success: true, message: 'Login successful' });
-  } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ error: 'Database error' });
+  const user = db.get('users').find({ username, password }).value();
+  if (!user) {
+    return res.status(401).json({ error: 'Invalid credentials' });
   }
+  if (user.ip_address !== ip) {
+    return res.status(403).json({ error: 'IP address mismatch' });
+  }
+  req.session.user = { id: user.id, username: user.username, role: user.role };
+  res.json({ success: true, message: 'Login successful' });
 });
 
 // Logout route
@@ -185,77 +145,63 @@ app.get('/me', authRequired, (req, res) => {
   res.json({ user: req.session.user });
 });
 
-// Send message
 app.post('/message', authRequired, (req, res) => {
   const userId = req.session.user.id;
   const { content, group_id, reply_to, mentions } = req.body;
   if (!content || content.trim() === '') {
     return res.status(400).json({ error: 'Message content required' });
   }
-  try {
-    const createdAt = new Date().toISOString();
-    const result = db.prepare(`INSERT INTO pesan (user_id, group_id, content, created_at, reply_to, mentions)
-                               VALUES (?, ?, ?, ?, ?, ?)`).run(userId, group_id || null, content, createdAt, reply_to || null, mentions || null);
-    const messageId = result.lastInsertRowid;
-    io.emit('new_message', {
-      id: messageId,
-      user_id: userId,
-      group_id: group_id || null,
-      content,
-      created_at: createdAt,
-      reply_to: reply_to || null,
-      mentions: mentions || null,
-      edited: 0,
-      pinned: 0
-    });
-    res.json({ success: true, messageId });
-  } catch (err) {
-    console.error('Send message error:', err);
-    res.status(500).json({ error: 'Failed to send message' });
-  }
+  const createdAt = new Date().toISOString();
+  const newMessageId = db.get('pesan').size().value() + 1;
+  const newMessage = {
+    id: newMessageId,
+    user_id: userId,
+    group_id: group_id || null,
+    content,
+    created_at: createdAt,
+    updated_at: null,
+    edited: 0,
+    pinned: 0,
+    reply_to: reply_to || null,
+    mentions: mentions || null
+  };
+  db.get('pesan').push(newMessage).write();
+  io.emit('new_message', newMessage);
+  res.json({ success: true, messageId: newMessageId });
 });
 
-// Edit message
 app.put('/message/:id', authRequired, (req, res) => {
   const userId = req.session.user.id;
-  const messageId = req.params.id;
+  const messageId = Number(req.params.id);
   const { content } = req.body;
   if (!content || content.trim() === '') {
     return res.status(400).json({ error: 'Message content required' });
   }
-  try {
-    const message = db.prepare('SELECT * FROM pesan WHERE id = ?').get(messageId);
-    if (!message) return res.status(404).json({ error: 'Message not found' });
-    if (message.user_id !== userId && req.session.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Not authorized to edit this message' });
-    }
-    const updatedAt = new Date().toISOString();
-    db.prepare('UPDATE pesan SET content = ?, updated_at = ?, edited = 1 WHERE id = ?').run(content, updatedAt, messageId);
-    io.emit('edit_message', { id: messageId, content, updated_at: updatedAt, edited: 1 });
-    res.json({ success: true });
-  } catch (err) {
-    console.error('Edit message error:', err);
-    res.status(500).json({ error: 'Failed to update message' });
+  let message = db.get('pesan').find({ id: messageId }).value();
+  if (!message) return res.status(404).json({ error: 'Message not found' });
+  if (message.user_id !== userId && req.session.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Not authorized to edit this message' });
   }
+  const updatedAt = new Date().toISOString();
+  message.content = content;
+  message.updated_at = updatedAt;
+  message.edited = 1;
+  db.get('pesan').find({ id: messageId }).assign(message).write();
+  io.emit('edit_message', { id: messageId, content, updated_at: updatedAt, edited: 1 });
+  res.json({ success: true });
 });
 
-// Delete message
 app.delete('/message/:id', authRequired, (req, res) => {
   const userId = req.session.user.id;
-  const messageId = req.params.id;
-  try {
-    const message = db.prepare('SELECT * FROM pesan WHERE id = ?').get(messageId);
-    if (!message) return res.status(404).json({ error: 'Message not found' });
-    if (message.user_id !== userId && req.session.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Not authorized to delete this message' });
-    }
-    db.prepare('DELETE FROM pesan WHERE id = ?').run(messageId);
-    io.emit('delete_message', { id: messageId });
-    res.json({ success: true });
-  } catch (err) {
-    console.error('Delete message error:', err);
-    res.status(500).json({ error: 'Failed to delete message' });
+  const messageId = Number(req.params.id);
+  let message = db.get('pesan').find({ id: messageId }).value();
+  if (!message) return res.status(404).json({ error: 'Message not found' });
+  if (message.user_id !== userId && req.session.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Not authorized to delete this message' });
   }
+  db.get('pesan').remove({ id: messageId }).write();
+  io.emit('delete_message', { id: messageId });
+  res.json({ success: true });
 });
 
 // Upload file
