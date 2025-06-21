@@ -2,6 +2,7 @@ const socket = io();
 
 let currentUser = null;
 let currentGroupId = null;
+let currentChatUserId = null; // For private chat
 let draftKey = 'chat_draft';
 let isEditingMessageId = null;
 
@@ -22,6 +23,7 @@ const btnBackup = document.getElementById('btnBackup');
 const btnSearchToggle = document.getElementById('btnSearchToggle');
 const searchBar = document.getElementById('searchBar');
 const searchInput = document.getElementById('searchInput');
+const btnProfile = document.getElementById('btnProfile');
 
 let mediaRecorder = null;
 let recordedChunks = [];
@@ -37,11 +39,55 @@ async function init() {
     const data = await res.json();
     currentUser = data.user;
     await loadGroups();
+    await loadContacts();
     loadDraft();
+    setupSocketListeners();
   } catch (err) {
     console.error('Failed to initialize:', err);
     window.location.href = '/login.html';
   }
+}
+
+// Setup Socket.IO event listeners
+function setupSocketListeners() {
+  socket.on('new_message', (message) => {
+    if (currentChatUserId) {
+      // Private chat
+      if ((message.user_id === currentUser.id && message.receiver_id === currentChatUserId) ||
+          (message.user_id === currentChatUserId && message.receiver_id === currentUser.id)) {
+        const msgElement = createMessageElement(message);
+        messagesContainer.appendChild(msgElement);
+        scrollToBottom();
+      }
+    } else if (currentGroupId) {
+      // Group chat
+      if (message.group_id === currentGroupId) {
+        const msgElement = createMessageElement(message);
+        messagesContainer.appendChild(msgElement);
+        scrollToBottom();
+      }
+    } else {
+      // General chat
+      if (!message.group_id && !message.receiver_id) {
+        const msgElement = createMessageElement(message);
+        messagesContainer.appendChild(msgElement);
+        scrollToBottom();
+      }
+    }
+  });
+
+  socket.on('edit_message', (message) => {
+    const msgElement = document.querySelector(`[data-id="${message.id}"]`);
+    if (msgElement) {
+      const newMsgElement = createMessageElement(message);
+      msgElement.replaceWith(newMsgElement);
+    }
+  });
+
+  socket.on('delete_message', ({ id }) => {
+    const msgElement = document.querySelector(`[data-id="${id}"]`);
+    if (msgElement) msgElement.remove();
+  });
 }
 
 // Load groups from server
@@ -58,6 +104,7 @@ async function loadGroups() {
     generalChat.className = 'p-2 rounded cursor-pointer hover:bg-gray-300 dark:hover:bg-gray-700';
     generalChat.addEventListener('click', () => {
       currentGroupId = null;
+      currentChatUserId = null;
       chatTitle.textContent = 'General Chat';
       loadMessages();
     });
@@ -70,6 +117,7 @@ async function loadGroups() {
       groupItem.className = 'p-2 rounded cursor-pointer hover:bg-gray-300 dark:hover:bg-gray-700';
       groupItem.addEventListener('click', () => {
         currentGroupId = group.id;
+        currentChatUserId = null;
         chatTitle.textContent = group.name;
         loadMessages();
       });
@@ -85,10 +133,54 @@ async function loadGroups() {
   }
 }
 
+// Load contacts (users) for private chat
+async function loadContacts() {
+  try {
+    const res = await fetch('/users');
+    const users = await res.json();
+    const contactsContainer = document.getElementById('contactsList');
+    if (!contactsContainer) return;
+    contactsContainer.innerHTML = '';
+
+    users.forEach(user => {
+      if (user.id === currentUser.id) return; // Skip self
+      const userItem = document.createElement('div');
+      userItem.className = 'p-2 rounded cursor-pointer hover:bg-gray-300 dark:hover:bg-gray-700 flex items-center gap-2';
+      userItem.addEventListener('click', () => {
+        currentChatUserId = user.id;
+        currentGroupId = null;
+        chatTitle.textContent = user.username;
+        loadMessages();
+      });
+
+      const avatar = document.createElement('img');
+      avatar.src = user.profilePic || 'https://images.pexels.com/photos/220453/pexels-photo-220453.jpeg';
+      avatar.alt = user.username;
+      avatar.className = 'w-8 h-8 rounded-full object-cover';
+      userItem.appendChild(avatar);
+
+      const usernameSpan = document.createElement('span');
+      usernameSpan.textContent = user.username;
+      userItem.appendChild(usernameSpan);
+
+      contactsContainer.appendChild(userItem);
+    });
+  } catch (err) {
+    console.error('Failed to load contacts:', err);
+  }
+}
+
 // Load messages from server
 async function loadMessages() {
   try {
-    const url = currentGroupId ? `/messages/${currentGroupId}` : '/messages';
+    let url;
+    if (currentChatUserId) {
+      url = `/messages/search?privateChatUser=${currentChatUserId}&q=`;
+    } else if (currentGroupId) {
+      url = `/messages/${currentGroupId}`;
+    } else {
+      url = '/messages';
+    }
     const res = await fetch(url);
     const messages = await res.json();
     
@@ -113,8 +205,9 @@ function createMessageElement(message) {
   header.className = 'flex justify-between items-center mb-1';
   
   const username = document.createElement('span');
-  username.className = 'font-semibold text-sm';
+  username.className = 'font-semibold text-sm cursor-pointer';
   username.textContent = message.username || 'Unknown User';
+  username.onclick = () => openUserProfile(message.user_id);
   header.appendChild(username);
 
   const timestamp = document.createElement('span');
@@ -177,6 +270,110 @@ function createMessageElement(message) {
   return div;
 }
 
+// Open user profile modal
+async function openUserProfile(userId) {
+  try {
+    const res = await fetch(`/user/${userId}`);
+    if (!res.ok) throw new Error('Failed to fetch user profile');
+    const user = await res.json();
+
+    modalContent.innerHTML = `
+      <div class="flex flex-col items-center">
+        <img src="${user.profilePic || 'https://images.pexels.com/photos/220453/pexels-photo-220453.jpeg'}" alt="${user.username}" class="w-24 h-24 rounded-full object-cover mb-4" />
+        <h2 class="text-xl font-semibold mb-2">${user.username}</h2>
+        <p class="text-gray-600 dark:text-gray-400 mb-4">${user.bio || 'No bio available.'}</p>
+        <button id="btnStartPrivateChat" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded">Start Private Chat</button>
+        <button id="btnCloseModal" class="mt-4 text-gray-600 hover:text-gray-900 dark:hover:text-white">Close</button>
+      </div>
+    `;
+
+    document.getElementById('btnStartPrivateChat').onclick = () => {
+      currentChatUserId = user.id;
+      currentGroupId = null;
+      chatTitle.textContent = user.username;
+      loadMessages();
+      closeModal();
+    };
+
+    document.getElementById('btnCloseModal').onclick = closeModal;
+
+    modalOverlay.classList.remove('hidden');
+    modalOverlay.classList.add('flex');
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
+// Open profile update modal
+function openProfileUpdateModal() {
+  modalContent.innerHTML = `
+    <h2 class="text-xl font-semibold mb-4">Update Profile</h2>
+    <form id="profileUpdateForm" class="space-y-4">
+      <div>
+        <label for="profilePicInput" class="block mb-1">Profile Picture</label>
+        <input type="file" id="profilePicInput" accept="image/*" />
+      </div>
+      <div>
+        <label for="bioInput" class="block mb-1">Bio</label>
+        <textarea id="bioInput" rows="4" class="w-full p-2 border rounded" placeholder="Enter your bio"></textarea>
+      </div>
+      <div class="flex justify-end gap-2">
+        <button type="button" id="btnCancelProfileUpdate" class="px-4 py-2 text-gray-600 hover:text-gray-900">Cancel</button>
+        <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Save</button>
+      </div>
+    </form>
+  `;
+
+  // Load current bio
+  fetch('/me').then(res => res.json()).then(data => {
+    document.getElementById('bioInput').value = data.user.bio || '';
+  });
+
+  document.getElementById('btnCancelProfileUpdate').onclick = closeModal;
+
+  document.getElementById('profileUpdateForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const bio = document.getElementById('bioInput').value;
+    const profilePicFile = document.getElementById('profilePicInput').files[0];
+
+    const formData = new FormData();
+    formData.append('bio', bio);
+    if (profilePicFile) {
+      formData.append('profilePic', profilePicFile);
+    }
+
+    try {
+      const res = await fetch('/profile', {
+        method: 'PUT',
+        body: formData
+      });
+      if (!res.ok) throw new Error('Failed to update profile');
+      const data = await res.json();
+      currentUser = data.user;
+      alert('Profile updated successfully');
+      closeModal();
+      loadContacts();
+      loadMessages();
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+
+  modalOverlay.classList.remove('hidden');
+  modalOverlay.classList.add('flex');
+}
+
+// Close modal
+function closeModal() {
+  modalOverlay.classList.add('hidden');
+  modalOverlay.classList.remove('flex');
+}
+
+// Profile button event
+if (btnProfile) {
+  btnProfile.addEventListener('click', openProfileUpdateModal);
+}
+
 // Edit message
 function editMessage(message) {
   isEditingMessageId = message.id;
@@ -224,10 +421,16 @@ messageForm.addEventListener('submit', async (e) => {
       btnSend.textContent = 'Send';
     } else {
       // Send new message
+      const messageData = {
+        content,
+        group_id: currentGroupId,
+        receiver_id: currentChatUserId
+      };
+
       const res = await fetch('/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content, group_id: currentGroupId }),
+        body: JSON.stringify(messageData),
       });
       if (!res.ok) throw new Error('Failed to send message');
     }
@@ -326,7 +529,8 @@ fileInput.addEventListener('change', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         content: `[File](${data.fileUrl})`,
-        group_id: currentGroupId
+        group_id: currentGroupId,
+        receiver_id: currentChatUserId
       }),
     });
     loadMessages();
@@ -379,7 +583,8 @@ function startRecording() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               content: `[Voice Note](${data.fileUrl})`,
-              group_id: currentGroupId
+              group_id: currentGroupId,
+              receiver_id: currentChatUserId
             }),
           });
           loadMessages();
@@ -408,9 +613,15 @@ searchInput.addEventListener('input', debounce(async () => {
   }
 
   try {
-    const url = currentGroupId ? 
-      `/messages/search?group=${currentGroupId}&q=${query}` : 
-      `/messages/search?q=${query}`;
+    let url;
+    if (currentChatUserId) {
+      url = `/messages/search?privateChatUser=${currentChatUserId}&q=${query}`;
+    } else if (currentGroupId) {
+      url = `/messages/search?group=${currentGroupId}&q=${query}`;
+    } else {
+      url = `/messages/search?q=${query}`;
+    }
+    
     const res = await fetch(url);
     const messages = await res.json();
     
@@ -445,26 +656,12 @@ btnBackup.addEventListener('click', async () => {
   }
 });
 
-// Socket.IO events
-socket.on('new_message', (message) => {
-  if (!currentGroupId && !message.group_id || currentGroupId === message.group_id) {
-    const msgElement = createMessageElement(message);
-    messagesContainer.appendChild(msgElement);
-    scrollToBottom();
+// Toggle search bar
+btnSearchToggle.addEventListener('click', () => {
+  searchBar.classList.toggle('hidden');
+  if (!searchBar.classList.contains('hidden')) {
+    searchInput.focus();
   }
-});
-
-socket.on('edit_message', (message) => {
-  const msgElement = document.querySelector(`[data-id="${message.id}"]`);
-  if (msgElement) {
-    const newMsgElement = createMessageElement(message);
-    msgElement.replaceWith(newMsgElement);
-  }
-});
-
-socket.on('delete_message', ({ id }) => {
-  const msgElement = document.querySelector(`[data-id="${id}"]`);
-  if (msgElement) msgElement.remove();
 });
 
 // Utility function for debouncing
@@ -481,4 +678,4 @@ function debounce(func, wait) {
 }
 
 // Initialize app
-window.onload = init;
+document.addEventListener('DOMContentLoaded', init);

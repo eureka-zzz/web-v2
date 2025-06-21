@@ -126,6 +126,8 @@ app.post('/register', (req, res) => {
     password,
     ip_address: ip,
     role,
+    profilePic: '', // default empty profile picture
+    bio: '', // default empty bio
     created_at: new Date().toISOString(),
     last_seen: new Date().toISOString()
   };
@@ -199,7 +201,20 @@ app.post('/logout', (req, res) => {
 
 // Get current user info
 app.get('/me', authRequired, (req, res) => {
-  res.json({ user: req.session.user });
+  const user = db.get('users').find({ id: req.session.user.id }).value();
+  res.json({ user });
+});
+
+// Get all users (for contacts list)
+app.get('/users', authRequired, (req, res) => {
+  const users = db.get('users')
+    .value()
+    .map(user => {
+      // Exclude sensitive information
+      const { password, ip_address, ...safeUser } = user;
+      return safeUser;
+    });
+  res.json(users);
 });
 
 // Get all groups
@@ -228,14 +243,19 @@ app.post('/group', authRequired, (req, res) => {
   res.json({ success: true, group: newGroup });
 });
 
-// Get messages (with optional group filter)
+// Get messages (with optional group filter or private chat)
 app.get('/messages/:groupId?', authRequired, (req, res) => {
   let messages = db.get('pesan');
+  const currentUserId = req.session.user.id;
   
   if (req.params.groupId) {
+    // Group messages only
     messages = messages.filter({ group_id: parseInt(req.params.groupId) });
   } else {
-    messages = messages.filter({ group_id: null });
+    // General chat only - exclude private messages and group messages
+    messages = messages.filter(msg => {
+      return !msg.group_id && !msg.receiver_id;
+    });
   }
 
   messages = messages.value().map(msg => {
@@ -251,11 +271,23 @@ app.get('/messages/:groupId?', authRequired, (req, res) => {
 
 // Search messages
 app.get('/messages/search', authRequired, (req, res) => {
-  const { q, group } = req.query;
+  const { q, group, privateChatUser } = req.query;
+  const currentUserId = req.session.user.id;
   let messages = db.get('pesan');
 
   if (group) {
     messages = messages.filter({ group_id: parseInt(group) });
+  } else if (privateChatUser) {
+    const otherUserId = parseInt(privateChatUser);
+    messages = messages.filter(msg => {
+      return (msg.user_id === currentUserId && msg.receiver_id === otherUserId) ||
+             (msg.user_id === otherUserId && msg.receiver_id === currentUserId);
+    });
+  } else {
+    // General chat search only - exclude private messages and group messages
+    messages = messages.filter(msg => {
+      return !msg.group_id && !msg.receiver_id;
+    });
   }
 
   messages = messages
@@ -275,7 +307,7 @@ app.get('/messages/search', authRequired, (req, res) => {
 // Send message
 app.post('/message', authRequired, (req, res) => {
   const userId = req.session.user.id;
-  const { content, group_id, reply_to, mentions } = req.body;
+  const { content, group_id, reply_to, mentions, receiver_id } = req.body;
 
   if (!content || content.trim() === '') {
     return res.status(400).json({ error: 'Message content required' });
@@ -286,6 +318,7 @@ app.post('/message', authRequired, (req, res) => {
     id: newId,
     user_id: userId,
     group_id: group_id || null,
+    receiver_id: receiver_id || null,
     content,
     created_at: new Date().toISOString(),
     updated_at: null,
@@ -376,6 +409,37 @@ app.post('/upload', authRequired, upload.single('file'), (req, res) => {
   }
   const fileUrl = `/uploads/${req.file.filename}`;
   res.json({ success: true, fileUrl });
+});
+
+// Get user profile by id
+app.get('/user/:id', authRequired, (req, res) => {
+  const userId = parseInt(req.params.id);
+  const user = db.get('users').find({ id: userId }).value();
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+  // Exclude password from response
+  const { password, ...userData } = user;
+  res.json(userData);
+});
+
+// Update profile (bio and profilePic)
+app.put('/profile', authRequired, upload.single('profilePic'), (req, res) => {
+  const userId = req.session.user.id;
+  const { bio } = req.body;
+  const user = db.get('users').find({ id: userId }).value();
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const updateData = {};
+  if (bio !== undefined) updateData.bio = bio;
+  if (req.file) {
+    updateData.profilePic = `/uploads/${req.file.filename}`;
+  }
+
+  db.get('users').find({ id: userId }).assign(updateData).write();
+  res.json({ success: true, user: db.get('users').find({ id: userId }).value() });
 });
 
 // Backup chat
